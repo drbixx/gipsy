@@ -68,6 +68,7 @@ class SheltranToPythonConverter:
         self.procedure_name = None # Used to track current procedure for RETURN statements
         self.current_select_var = None # For SELECT CASE statements
         self.in_procedure = False # Tracks if currently inside a PROC block
+        self.gipsy_blank_defined = False # Tracks if GIPSY_BLANK needs to be defined
 
     def convert_file(self, input_filepath, output_filepath=None):
         if not output_filepath:
@@ -90,6 +91,11 @@ class SheltranToPythonConverter:
         # Assemble the final Python script.
         # Start with any collected imports.
         final_output_list = []
+        
+        # Add GIPSY_BLANK definition if needed
+        if self.gipsy_blank_defined:
+            final_output_list.append("GIPSY_BLANK = float('nan') # Placeholder for GIPSY BLANK value. Verify if 'nan' is appropriate.\n\n")
+
         if self.imports:
             for imp in sorted(list(self.imports)): # Sort for consistent output
                 final_output_list.append(f"import {imp}\n")
@@ -519,28 +525,77 @@ class SheltranToPythonConverter:
         # CALL statement (subroutine call, potentially with arguments and alternate returns)
         call_match = re.match(r"CALL\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\((.*)\))?", code_part, re.IGNORECASE)
         if call_match:
-            subroutine_name = call_match.group(1)
-            args_str_sheltran = call_match.group(2) # String containing all arguments
+            subroutine_name_orig = call_match.group(1)
+            subroutine_name_upper = subroutine_name_orig.upper()
+            raw_args_string = call_match.group(2) # String containing all arguments, or None
             
-            python_args_list = []
-            alternate_returns_comments = []
+            # Handle specific GIPSY routines
+            if subroutine_name_upper == 'INIT':
+                self._add_line(f"# PROGRAM START (Original CALL {subroutine_name_orig})")
+                return
+            elif subroutine_name_upper == 'FINIS':
+                self._add_line(f"# PROGRAM END (Original CALL {subroutine_name_orig})")
+                return
+            
+            sheltran_individual_args = []
+            if raw_args_string:
+                sheltran_individual_args = [arg.strip() for arg in re.split(r',(?![^()]*\))', raw_args_string)]
 
-            if args_str_sheltran:
-                # Simple comma-based splitting. This is a known simplification and will NOT correctly parse:
-                # - Quoted string arguments containing commas.
-                # - Function calls as arguments if those functions themselves take multiple comma-separated arguments.
-                sheltran_arg_parts = [arg.strip() for arg in args_str_sheltran.split(',')]
-                for idx, single_arg in enumerate(sheltran_arg_parts):
-                    if single_arg.startswith('*'): # SHELTRAN alternate return syntax (*label or *keyword)
-                        alt_return_target = single_arg[1:]
-                        alternate_returns_comments.append(f"# Original CALL had alternate return target *{alt_return_target} at arg position {idx+1}. Python does not support direct alternate returns; this may require refactoring using exceptions or status flags.")
+            if subroutine_name_upper == 'ANYOUT':
+                unit_translated = "None"
+                message_translated = "\"\"" # Default to empty string if not enough args
+                if len(sheltran_individual_args) >= 1: # GIPSY ANYOUT might sometimes only have message
+                    if len(sheltran_individual_args) >= 2:
+                        unit_translated = self._translate_expression(sheltran_individual_args[0])
+                        message_translated = self._translate_expression(sheltran_individual_args[1])
+                    else: # Only one argument, assume it's the message
+                        message_translated = self._translate_expression(sheltran_individual_args[0])
+                self._add_line(f"print({message_translated}) # ANYOUT (original unit: {unit_translated if unit_translated != 'None' else 'not specified'})")
+                return
+            elif subroutine_name_upper == 'ERROR':
+                level_translated = "1" # Default error level
+                message_translated = "\"\""
+                if len(sheltran_individual_args) >= 1: # GIPSY ERROR might sometimes only have message
+                    if len(sheltran_individual_args) >= 2:
+                        level_translated = self._translate_expression(sheltran_individual_args[0])
+                        message_translated = self._translate_expression(sheltran_individual_args[1])
+                    else: # Only one argument, assume it's the message
+                        message_translated = self._translate_expression(sheltran_individual_args[0])
+                self.imports.add("sys")
+                # Ensure f-string content is properly escaped if message_translated could be complex
+                # For now, assuming simple string or variable after translation
+                self._add_line(f'sys.stderr.write(f"ERROR (L{{{level_translated}}}): {{{message_translated}}}\\n") # CALL {subroutine_name_orig}')
+                return
+            elif subroutine_name_upper == 'SETFBLANK':
+                if sheltran_individual_args:
+                    variable_name_translated = self._translate_expression(sheltran_individual_args[0])
+                    self._add_line(f"{variable_name_translated} = GIPSY_BLANK # SETFBLANK. TODO: Verify GIPSY_BLANK definition is appropriate.")
+                    self.gipsy_blank_defined = True
+                else:
+                    self._add_line(f"# CALL {subroutine_name_orig} with no arguments - expected a variable. Manual check needed.")
+                return
+
+            # Default CALL processing for other routines
+            translated_py_args = []
+            alternate_returns_comments = []
+            if raw_args_string: # Re-check as sheltran_individual_args might be empty if raw_args_string was None
+                for idx, single_arg_str in enumerate(sheltran_individual_args):
+                    if single_arg_str.startswith('*'): 
+                        alt_return_target = single_arg_str[1:] 
+                        comment_text = (f"# Original CALL had alternate return specifier: {single_arg_str} "
+                                        f"at effective argument position {idx+1}. "
+                                        "Python does not support direct alternate returns via arguments; "
+                                        "this may require refactoring using exceptions, status flags, or callbacks.")
+                        alternate_returns_comments.append(comment_text)
                     else:
-                        python_args_list.append(single_arg) # Keep other arguments as they are
+                        translated_arg = self._translate_expression(single_arg_str)
+                        translated_py_args.append(translated_arg)
             
-            py_call_str = f"{subroutine_name}({', '.join(python_args_list)}) # CALL {subroutine_name}"
+            py_call_str = f"{subroutine_name_orig}({', '.join(translated_py_args)}) # CALL {subroutine_name_orig}"
+            
             if alternate_returns_comments:
-                # Append comments about alternate returns.
                 py_call_str += " " + " ".join(alternate_returns_comments)
+            
             self._add_line(py_call_str)
             return
 
@@ -690,7 +745,262 @@ class SheltranToPythonConverter:
 
         # Default catch-all: If no specific rule matched the `code_part` (content from col 7 onwards),
         # comment out the original SHELTRAN line, prefixed with its line number for reference.
+        
+        # --- Assignment Statement Translation (LHS = RHS) ---
+        # This should be one of the last checks, as other keywords might contain '='.
+        # We need to robustly find the main '=' of the assignment.
+        # A simple regex like r"(.+?)\s*=\s*(.+)" can be too greedy or not greedy enough
+        # if the LHS or RHS contains function calls with named arguments (e.g. X = FUNC(ARG=Y)).
+        #
+        # Strategy: Find the first '=' that is not inside parentheses.
+        # This is a common way to distinguish the main assignment operator.
+        
+        paren_level = 0
+        split_index = -1
+        for i, char in enumerate(code_part):
+            if char == '(':
+                paren_level += 1
+            elif char == ')':
+                paren_level -= 1
+            elif char == '=' and paren_level == 0:
+                split_index = i
+                break
+        
+        if split_index != -1:
+            lhs_fortran = code_part[:split_index].strip()
+            rhs_fortran = code_part[split_index+1:].strip()
+
+            if lhs_fortran and rhs_fortran: # Ensure both sides are non-empty
+                translated_rhs = self._translate_expression(rhs_fortran)
+                translated_lhs = self._translate_expression(lhs_fortran) # Translate LHS for array/slice syntax
+
+                # Check if the translated LHS is a string slice assignment
+                # Regex to detect slice [start:end] or [index][start:end] etc.
+                # Looks for a colon within the last pair of square brackets.
+                is_lhs_string_slice = False
+                # Find all bracketed parts in translated_lhs
+                bracket_groups = re.findall(r"(\[[^\]]+\])", translated_lhs)
+                if bracket_groups:
+                    last_bracket_group = bracket_groups[-1]
+                    if ":" in last_bracket_group:
+                        is_lhs_string_slice = True
+                
+                # Also, if the original Fortran LHS was explicitly a character slice e.g. VAR(A:B)
+                # This is already handled by _translate_expression turning it into VAR[... : ...]
+                # The check above on translated_lhs should catch this.
+
+                if is_lhs_string_slice:
+                    self._add_line(f"# ORIGINAL: {original_line_for_comment.strip()}")
+                    self._add_line(f"# NOTE: Assignment to a string slice. Python strings are immutable.")
+                    self._add_line(f"# Manual refactoring needed (e.g., string concatenation or list of chars).")
+                else:
+                    # Standard assignment (variable or array element)
+                    self._add_line(f"{translated_lhs} = {translated_rhs}")
+                return # Assignment handled (either translated or commented)
+
         self._add_line(f"# UNTRANSLATED (L{line_number}): {original_line_for_comment.strip()}")
+
+    def _translate_expression(self, expr_str):
+        # Placeholder for Fortran expression translation (intrinsics, slicing, array access)
+        
+        # Order of operations can be important here.
+        # 1. Array Access: MYARRAY(I, J) -> MYARRAY[i_py][j_py]
+        # 2. String Slicing: MYSTRING(I:J) -> MYSTRING[i_py:j_py]
+        # 3. Intrinsic Functions: FUNC(ARG) -> py_func(arg_py)
+
+        # --- 1. Fortran Array Access: ARRAY(idx1, idx2, ...) -> array[idx1_py][idx2_py]... ---
+        # Regex to find Fortran-style array access: IDENTIFIER(comma_separated_args_not_containing_colon)
+        # This negative lookahead for ':' helps distinguish array access from string slicing.
+        # The arguments themselves can be complex expressions.
+        array_access_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(((?:(?!\s*:\s*)[^()])+)\)")
+
+        def replace_array_access(match_obj):
+            array_name = match_obj.group(1)
+            indices_str = match_obj.group(2)
+
+            # Split indices by comma, but be careful with nested parentheses (e.g. A(I, FUNC(B,C)))
+            # This basic split is a simplification. A more robust approach would use a balanced parenthesis parser.
+            fortran_indices = [idx.strip() for idx in re.split(r',(?![^()]*\))', indices_str)]
+            
+            python_indices_parts = []
+            index_comments = []
+
+            for fi in fortran_indices:
+                try:
+                    # If index is an integer literal, adjust it
+                    py_idx_val = int(fi) - 1
+                    python_indices_parts.append(str(py_idx_val))
+                except ValueError:
+                    # If index is a variable or complex expression, translate it and then subtract 1
+                    # Recursively call _translate_expression for the index part
+                    translated_fi = self._translate_expression(fi)
+                    # Ensure parentheses if translated_fi itself is complex, e.g. (X+Y)-1
+                    if any(op in translated_fi for op in ['+', '-', '*', '/', '%']):
+                        python_indices_parts.append(f"({translated_fi}) - 1")
+                    else:
+                        python_indices_parts.append(f"{translated_fi} - 1")
+                    index_comments.append(f"# REVIEW INDEX: Verify subtraction for 0-based: {python_indices_parts[-1]}")
+            
+            # Construct Python array access: array_name[idx1][idx2]...
+            py_access_str = array_name
+            for pi_part in python_indices_parts:
+                py_access_str += f"[{pi_part}]"
+            
+            main_comment = "# REVIEW ARRAY ACCESS: Fortran 1-based indexing converted to 0-based."
+            full_comment = " ".join([main_comment] + index_comments)
+            return f"{py_access_str} {full_comment}"
+
+        # Iteratively apply array access translation
+        prev_expr_str_arr = ""
+        while expr_str != prev_expr_str_arr:
+            prev_expr_str_arr = expr_str
+            expr_str = array_access_pattern.sub(replace_array_access, expr_str)
+
+        # --- 2. Fortran String Slicing: VAR(start:end) -> VAR[start-1:end] ---
+        # Regex to find Fortran-style substring VAR(exp1:exp2).
+        # Important: This must be distinct enough not to clash with array access or function calls.
+        # The presence of a colon is key.
+        # It needs to be careful about function calls that look similar.
+        # This regex tries to match identifiers followed by (expr:expr).
+        # It's simplified and might need refinement for complex nested cases.
+        def replace_slice(match):
+            var_name = match.group(1)
+            start_expr = match.group(2)
+            end_expr = match.group(3)
+            
+            py_start = ""
+            py_end = end_expr if end_expr else ""
+
+            comment = ""
+
+            if start_expr:
+                try:
+                    # If start_expr is an integer literal, adjust it
+                    py_start = str(int(start_expr) - 1)
+                except ValueError:
+                    # If start_expr is a variable or complex expression
+                    py_start = start_expr
+                    comment = " # REVIEW SLICING: Fortran STR(A:B) to Python STR[A-1:B]. Verify start index."
+            
+            # If end_expr is empty, Python slice [:end] or [start:] handles it.
+            # If start_expr is empty, Python slice [:end] handles it.
+            # If both are empty VAR(:) -> VAR[:], less common in Fortran for full string.
+
+            if not start_expr and not end_expr: # VAR(:) - unlikely in Fortran, but translates to full slice
+                 return f"{var_name}[:]{comment}"
+            if not start_expr: # VAR(:end)
+                return f"{var_name}[:{py_end}]{comment}"
+            if not end_expr: # VAR(start:)
+                 return f"{var_name}[{py_start}:]{comment}"
+
+            return f"{var_name}[{py_start}:{py_end}]{comment}"
+
+        # Regex: Identifier followed by (possibly_empty_expr : possibly_empty_expr)
+        # Ensure it doesn't capture function calls like MYFUNC(ARG) if ARG doesn't have ':'
+        # The negative lookahead for r"\s*\)" before the colon was problematic.
+        # Simpler: look for identifier then ( then stuff with a colon, then ).
+        slice_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^:\)]*?)\s*:\s*([^:\)]*?)\s*\)")
+        
+        prev_expr_str_slice = ""
+        while expr_str != prev_expr_str_slice: # Loop until no more changes are made
+            prev_expr_str_slice = expr_str
+            expr_str = slice_pattern.sub(replace_slice, expr_str)
+
+
+        # --- 3. Fortran Intrinsic Functions ---
+        # Using a more robust regex to match function calls: FUNC_NAME ( ARG1, ARG2, ... )
+        # This will also require careful argument parsing if we want to translate args themselves.
+        
+        intrinsic_map = {
+            # Name: (Python_equivalent, min_args, max_args, needs_math_module, comment)
+            'INDEX': ('{0}.find({1})', 2, 2, False, "# NOTE: Fortran INDEX is 1-based, Python find is 0-based. Adjust if result is used numerically."),
+            'LEN':   ('len({0})', 1, 1, False, ""), # Assuming it's for CHARACTER strings
+            'MOD':   ('({0} % {1})', 2, 2, False, ""),
+            'ICHAR': ('ord({0})', 1, 1, False, ""),
+            'CHAR':  ('chr({0})', 1, 1, False, ""),
+            'FLOAT': ('float({0})', 1, 1, False, ""),
+            'INT':   ('int({0})', 1, 1, False, ""),
+            'ABS':   ('abs({0})', 1, 1, False, ""),
+            'SQRT':  ('math.sqrt({0})', 1, 1, True, ""),
+            'LOG':   ('math.log({0})', 1, 1, True, ""),
+            'LOG10': ('math.log10({0})', 1, 1, True, ""),
+            'EXP':   ('math.exp({0})', 1, 1, True, ""),
+            'SIN':   ('math.sin({0})', 1, 1, True, ""),
+            'COS':   ('math.cos({0})', 1, 1, True, ""),
+            'TAN':   ('math.tan({0})', 1, 1, True, ""),
+            'ASIN':  ('math.asin({0})', 1, 1, True, ""),
+            'ACOS':  ('math.acos({0})', 1, 1, True, ""),
+            'ATAN':  ('math.atan({0})', 1, 1, True, ""),
+            'ATAN2': ('math.atan2({0}, {1})', 2, 2, True, ""),
+            'MIN':   ('min({args_str})', 1, float('inf'), False, ""), # Handled by arg splitting
+            'MAX':   ('max({args_str})', 1, float('inf'), False, ""), # Handled by arg splitting
+            'SIGN':  ('math.copysign(float({0}), float({1}))', 2, 2, True, "# SIGN(A,B) -> math.copysign(float(A), float(B))")
+        }
+
+        # Regex to find function calls: FUNCTION_NAME followed by optional space and (arguments).
+        # This regex is designed to capture the function name and the entire argument string.
+        # It's simplified and doesn't handle nested functions perfectly without iterative application or a proper parser.
+        # Ensures it doesn't match already processed array/slice syntax like name[...]
+        # by requiring the opening parenthesis NOT to be preceded by a square bracket.
+        func_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?<!\[)\(([^)]*)\)", re.IGNORECASE)
+
+
+        def replace_func(match_obj):
+            func_name_fortran = match_obj.group(1).upper()
+            args_str_fortran = match_obj.group(2)
+
+            # Before processing as a potential intrinsic, check if it's actually an array/slice
+            # that was missed or if it's a user-defined function call.
+            # This check helps avoid misinterpreting array/slice as function if regex is too greedy.
+            if ":" in args_str_fortran and func_name_fortran.upper() not in intrinsic_map: # Likely a slice if colon present and not a known func
+                 # This case should ideally be handled by the slice_pattern if it's robust.
+                 # If it reaches here, it might be a malformed slice or one that confused previous regex.
+                 pass # Let it be handled by slice logic or remain unchanged if not matching slice.
+
+            if func_name_fortran in intrinsic_map:
+                py_template, min_args, max_args, needs_math, comment = intrinsic_map[func_name_fortran]
+                
+                if needs_math:
+                    self.imports.add("math")
+
+                # Split arguments by comma, but be careful with nested parentheses (e.g. FUNC(A, B(1,2)))
+                # This basic split is a simplification.
+                args_fortran = [arg.strip() for arg in re.split(r',(?![^()]*\))', args_str_fortran)] 
+                if args_str_fortran.strip() == "": # Handle case of no arguments if string is empty
+                    args_fortran = []
+                
+                if not (min_args <= len(args_fortran) <= max_args):
+                    return match_obj.group(0) + f" # ARG COUNT MISMATCH for {func_name_fortran} (expected {min_args}-{max_args}, got {len(args_fortran)})"
+
+                py_args = [self._translate_expression(arg) for arg in args_fortran]
+
+                if func_name_fortran in ['MIN', 'MAX']:
+                    return py_template.format(args_str=", ".join(py_args)) + (f" {comment}" if comment else "")
+                else:
+                    try:
+                        return py_template.format(*py_args) + (f" {comment}" if comment else "")
+                    except IndexError: 
+                        return match_obj.group(0) + f" # TEMPLATE/ARG MISMATCH for {func_name_fortran}"
+            
+            # If not in intrinsic_map, it could be a user-defined function or an array access not caught by array_access_pattern
+            # If it looks like an array access (no colons in args), it might have been missed.
+            # However, the array_access_pattern is designed to be more specific.
+            # For now, assume it's a user function call and translate its arguments.
+            if '(' in match_obj.group(0) and ')' in match_obj.group(0) and not func_name_fortran in intrinsic_map:
+                 args_fortran = [arg.strip() for arg in re.split(r',(?![^()]*\))', args_str_fortran)]
+                 if args_str_fortran.strip() == "": args_fortran = []
+                 py_args = [self._translate_expression(arg) for arg in args_fortran]
+                 return f"{func_name_fortran}({', '.join(py_args)})"
+
+
+            return match_obj.group(0) # Return original if not an intrinsic and not clearly a user func call with args
+
+        prev_expr_str_func = ""
+        while expr_str != prev_expr_str_func:
+            prev_expr_str_func = expr_str
+            expr_str = func_pattern.sub(replace_func, expr_str)
+            
+        return expr_str
 
     def _translate_exit_specifier(self, specifier, context_comment=""):
         # Translates SHELTRAN ERR= or END= specifiers like STOP, RETURN, or a procedure name
@@ -719,12 +1029,15 @@ class SheltranToPythonConverter:
     def _translate_condition(self, condition_str):
         # Translates SHELTRAN/Fortran style logical conditions to Python syntax.
         # e.g., ".EQ." to "==", ".AND." to "and", ".TRUE." to "True".
+        
+        # First, translate expressions within the condition (like function calls or slices)
+        condition_str_py = self._translate_expression(condition_str)
         # Order of replacements is important (e.g., ".GE." before ".GT." to avoid partial match).
-        condition_str_py = condition_str.strip()
+        # condition_str_py = condition_str.strip() # Already stripped if coming from _translate_expression
         
         # Handle ".NOT." first as it can be combined with other operators.
         # Using word boundaries (\b) might be safer for some ops if variables can contain op names.
-        condition_str_py = re.sub(r"\.NOT\.\s*", "not ", condition_str_py, flags=re.IGNORECASE)
+        condition_str_py = re.sub(r"\.NOT\.\s*", "not ", condition_str_py, flags=re.IGNORECASE) # Apply to potentially pre-translated string
 
         # Define replacements for relational and logical operators.
         # Adding spaces around Python operators ensures separation from variable names.
@@ -737,7 +1050,8 @@ class SheltranToPythonConverter:
             r"\.LT\.": " < ",
             r"\.AND\.": " and ",
             r"\.OR\.": " or ",
-            # Fortran logical literals
+            # Fortran logical literals (already handled if .TRUE. or .FALSE. were arguments to functions)
+            # but good to have them here too for standalone logicals.
             r"\.TRUE\.": " True ",
             r"\.FALSE\.": " False ",
         }
