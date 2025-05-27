@@ -8,48 +8,65 @@ import sys
 SHELTRAN to Python Converter (sheltran_to_python.py)
 
 Purpose:
-This script provides a best-effort conversion of SHELTRAN (.shl) files, 
-a structured Fortran dialect used in the GIPSY (Groningen Image Processing System), 
-into Python (.py) files. The goal is to automate a significant portion of the 
-tedious syntactic translation, allowing developers to focus on semantic adjustments 
-and GIPSY-specific library call replacements.
+This script provides a best-effort conversion of SHELTRAN (.shl) and some standard
+Fortran 77 files into Python (.py) files. SHELTRAN is a structured Fortran dialect 
+used in the GIPSY (Groningen Image Processing System). The goal is to automate a 
+significant portion of the tedious syntactic translation, allowing developers to 
+focus on semantic adjustments and GIPSY-specific library call replacements.
 
 Overview of Conversion Capabilities:
-- Translates SHELTRAN control flow structures:
-    - IF <cond> THEN / ELSEIF <cond> THEN / ELSE / CIF (or ENDIF) to Python if/elif/else blocks.
-    - SELECT <expr> CASE <val> / OTHER / CSELECT to Python if/elif/else blocks using a temporary variable.
+- **SHELTRAN Control Flow:**
+    - IF <cond> THEN / ELSEIF <cond> THEN / ELSE / CIF (or ENDIF) to Python if/elif/else.
+    - SELECT <expr> CASE <val> / OTHER / CSELECT to Python if/elif/else.
     - WHILE <cond> / XWHILE / CWHILE to Python while/break.
     - REPEAT / XREPEAT / UNTIL <cond> to Python while True/break/if <cond>: break.
     - FOR <var>=<start>,<end>[,<step>] / XFOR / CFOR to Python for var in range(...): / break.
-- Converts SHELTRAN procedure definitions and calls:
+- **SHELTRAN Procedures:**
     - PROC <name> / CPROC to Python def name(): ...
     - PERFORM <name> to Python name()
-    - CALL <subroutine>(<args>) to Python <subroutine>(<args>), with alternate returns commented.
-- Handles basic SHELTRAN statements:
-    - STOP to sys.exit().
-    - RETURN to return.
-    - PARAMETER (<name>=<value>) to Python global constants (NAME = value).
-    - DATA <vars> /<values>/ to Python variable assignments (simplified).
-- Comments out SHELTRAN-specific or non-translatable elements:
-    - Variable declarations (INTEGER, REAL, CHARACTER, LOGICAL, etc.).
-    - EQUIVALENCE statements.
-    - FORMAT statements.
-    - Complex READ/WRITE statements.
-- Manages indentation for Python code blocks.
-- Handles SHELTRAN comment lines (C, *, N), Eject (E), Fortran directives (F), and Include (I) lines (converted to Python comments).
-- Processes SHELTRAN continuation lines.
+- **Fortran Program Units:**
+    - PROGRAM <name> to `# PROGRAM <name>`.
+    - SUBROUTINE <name>(args) to `def <name>(args): # SUBROUTINE <name>`.
+    - FUNCTION <name>(args) (with optional type prefix) to `def <name>(args): # FUNCTION <name>`.
+    - END statement to `# END (of unit_name)` with appropriate dedent.
+- **Assignments and Expressions:**
+    - Standard Fortran assignment statements (`LHS = RHS`) are translated.
+    - Expressions (RHS and LHS where applicable) are processed to:
+        - Convert common Fortran intrinsic functions to Python equivalents (e.g., `SQRT` to `math.sqrt`, `INDEX` to `.find` with caveats, `LEN`, `MOD`, `MIN`, `MAX`, `ICHAR`, `CHAR`, `LOG`, `EXP`, `SIN`, `COS`, etc.).
+        - Translate Fortran array accesses (e.g., `A(I,J)`) to Python's 0-based indexing (`A[I-1][J-1]`) with review comments.
+        - Convert basic Fortran string slicing (e.g., `S(I:J)`) to Python's `S[I-1:J]` with review comments.
+        - Assignments to string slices (e.g., `TEXT(1:5) = '...'`) are commented out with a note on Python string immutability.
+- **Basic Fortran/SHELTRAN Statements:**
+    - `CALL <subroutine>(args)`: Arguments are translated using expression rules. Alternate returns are commented.
+        - Specific GIPSY `CALL` patterns are handled:
+            - `CALL INIT` -> `# PROGRAM START ...`
+            - `CALL FINIS` -> `# PROGRAM END ...`
+            - `CALL ANYOUT(unit, msg)` -> `print(msg_py) # ANYOUT ...`
+            - `CALL ERROR(level, msg)` -> `sys.stderr.write(...)`
+            - `CALL SETFBLANK(var)` -> `var_py = GIPSY_BLANK` (with `GIPSY_BLANK` definition added).
+    - `STOP` to `sys.exit()`.
+    - `RETURN` to `return`.
+    - `PARAMETER (<name>=<value>)` to Python global constants.
+    - `DATA <vars> /<values>/` to Python variable assignments (simplified translation).
+- **Declarations (Converted to Comments):**
+    - `INTEGER`, `REAL`, `LOGICAL`, `CHARACTER [*N]`, `DOUBLE PRECISION` are commented out as `# DECLARATION: ...`.
+    - `DIMENSION A(d1,d2), B(d3)` is commented as `# DECLARATION: DIMENSION ...`.
+    - `COMMON /block/ varlist` is commented as `# COMMON /block/ varlist # Fortran COMMON ...`.
+    - `EQUIVALENCE (a,b)` is commented as `# EQUIVALENCE (a,b) # Fortran EQUIVALENCE ...`.
+- **General Features:**
+    - Manages indentation for Python code blocks.
+    - Handles SHELTRAN/Fortran comment lines (C, *, N), Eject (E), Fortran directives (F), and Include (I) lines (converted to Python comments).
+    - Processes Fortran continuation lines.
 
-Key Limitations:
-- Array Indexing: SHELTRAN is 1-indexed, while Python is 0-indexed. The script does NOT automatically adjust array accesses (e.g., `ARRAY(N)` in SHELTRAN becomes `ARRAY(N)` in Python, not `ARRAY[N-1]`). This requires careful manual review and adjustment in the generated Python code.
-- GIPSY-Specific Libraries: Translation of GIPSY-specific library calls (e.g., `gdsc_grid`, `INITRANS`, user I/O routines) is beyond the scope of this script. These will typically be left as is or commented out and require manual replacement with equivalent Python library calls or custom implementations.
-- FORMAT Statements: FORTRAN FORMAT statements are complex and have no direct, simple equivalent in Python for all cases. They are commented out and must be manually translated to Python string formatting or other I/O mechanisms.
-- Complex I/O: While basic OPEN, CLOSE, and REWIND are translated (with ERR= handling), complex READ/WRITE statements, especially those involving FORMATs or implied DO loops, are commented out.
-- DATA Statement Parsing: The DATA statement parser is basic and may fail on complex values, especially strings containing commas or repeat factors (e.g., `DATA A,B,C /3*0.0/`).
-- CALL Argument Parsing: Argument parsing in CALL statements is basic and might not handle all cases correctly, especially with complex expressions or function calls as arguments.
-- Implicit Typing and COMMON Blocks: SHELTRAN's implicit typing and COMMON blocks for shared memory are not directly translatable to Python's variable handling and scoping. Declarations are commented out, and logic relying on COMMON blocks will need significant refactoring.
-- Function Signatures for PROC: SHELTRAN PROCs can receive arguments via registers or COMMON blocks. The current translation creates parameter-less Python functions. These will need manual adjustment if arguments are expected.
-- Semantic Translation: This script performs primarily syntactic translation. The semantic meaning and behavior of the original SHELTRAN code, especially concerning GIPSY library interactions, must be understood and verified by a developer.
-- Reserved Keywords: The script does not currently check if a SHELTRAN variable name conflicts with a Python reserved keyword. If such a conflict occurs, manual renaming will be needed.
+Key Limitations and Manual Review Items:
+- **Array Indexing:** While basic conversion to 0-based indexing (`var-1`) is done, complex index expressions or indirect effects require careful manual verification. The script adds `# REVIEW ARRAY ACCESS` and `# REVIEW INDEX` comments.
+- **GIPSY-Specific Libraries:** Calls to GIPSY libraries (e.g., `GDSINP`, `FIEINI`, `USERIO`) are translated to Python function call syntax (e.g., `GDSINP(...)`) but require an equivalent Python GIPSY environment or manual reimplementation to be functional.
+- **Complex I/O:** `FORMAT` statements and most `READ`/`WRITE` statements involving formats or complex I/O lists are commented out and need manual translation to Python's I/O and string formatting capabilities.
+- **DATA Statement Complexity:** The `DATA` statement parser is basic and may fail on complex initializations (e.g., repeat factors, implied DO loops, non-literal values).
+- **COMMON/EQUIVALENCE:** These are commented out. Logic relying on them for memory layout or global state requires significant refactoring in Python.
+- **Function Signatures (Fortran/SHELTRAN):** Argument passing mechanisms (e.g., pass-by-reference implied by Fortran) and how functions return values (especially for Fortran `FUNCTION` type prefixes) need to be manually ensured in Python.
+- **Semantic Equivalence:** This script performs primarily syntactic translation. The semantic meaning, numerical precision, and exact behavior of the original code must be thoroughly tested and verified by a developer.
+- **Python Reserved Keywords:** The script does not currently check for conflicts between Fortran variable names and Python reserved keywords. These must be manually resolved.
 
 Basic Command-Line Usage:
     python sheltran_to_python.py input_file.shl [-o output_file.py]
@@ -212,7 +229,74 @@ class SheltranToPythonConverter:
         # The following sections use regex to identify and translate SHELTRAN keywords.
         # Order of these checks can be important for constructs that might partially match.
 
-        # PROCEDURE definition: PROC name -> def name():
+        # --- Program Unit Keywords (PROGRAM, SUBROUTINE, FUNCTION, END) ---
+        # These define the main structure of Fortran/SHELTRAN programs.
+
+        program_match = re.match(r"PROGRAM\s+([A-Za-z_][A-Za-z0-9_]*)", code_part, re.IGNORECASE)
+        if program_match:
+            program_name = program_match.group(1)
+            self._add_line(f"# Fortran PROGRAM {program_name}")
+            # A PROGRAM statement itself doesn't usually change indentation for its direct content
+            # but sets the context that we are in a main program unit.
+            self.procedure_name = program_name # Used for context with the END statement
+            self.in_procedure = True # Flag indicating we are inside a defined program unit
+            return
+
+        subroutine_match = re.match(r"SUBROUTINE\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(([^)]*)\))?", code_part, re.IGNORECASE)
+        if subroutine_match:
+            sub_name = subroutine_match.group(1)
+            args_str = subroutine_match.group(2) # Argument string, or None if no parentheses
+            # Split arguments by comma. Fortran/SHELTRAN args are typically simple identifiers.
+            parsed_args = [arg.strip() for arg in args_str.split(',')] if args_str else []
+            # Translate to a Python function definition.
+            self._add_line(f"def {sub_name}({', '.join(parsed_args)}): # Fortran SUBROUTINE {sub_name}")
+            self.indent_level += 1
+            self.procedure_name = sub_name # Store name for context with END statement
+            self.in_procedure = True      # Set flag indicating we're in a program unit
+            return
+
+        # Regex for FUNCTION, allowing for an optional type prefix (e.g., "INTEGER FUNCTION FNAME(...)").
+        # The type prefix is matched non-capturingly.
+        function_match = re.match(r"(?:[A-Za-z_][A-Za-z0-9_]*\s+)?FUNCTION\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*\(([^)]*)\))?", code_part, re.IGNORECASE)
+        if function_match:
+            func_name = function_match.group(1) # Captured function name
+            args_str = function_match.group(2)  # Captured argument string, or None
+            parsed_args = [arg.strip() for arg in args_str.split(',')] if args_str else []
+            # Translate to Python function definition.
+            # Note: Fortran function return type (if specified) is ignored here; Python functions return values dynamically.
+            self._add_line(f"def {func_name}({', '.join(parsed_args)}): # Fortran FUNCTION {func_name}")
+            self.indent_level += 1
+            self.procedure_name = func_name # Store name for context with END
+            self.in_procedure = True      # Set flag
+            return
+            
+        # Standalone END statement (distinguished from ENDIF, CWHILE etc. by specific regexes for those).
+        if re.match(r"END$", code_part, re.IGNORECASE):
+            # This END should correspond to a PROGRAM, SUBROUTINE, FUNCTION, or SHELTRAN PROC.
+            unit_name_ended = self.procedure_name if self.procedure_name else "PROGRAM/SUBROUTINE/FUNCTION/PROC"
+            
+            if self.in_procedure: # If we are logically inside a unit that should be ended.
+                # Check if the last significant line was a CPROC. If so, CPROC already handled the dedent.
+                # This is to avoid double dedent for SHELTRAN PROC...CPROC END sequences.
+                # This heuristic might need refinement if CPROC isn't always immediately before END for PROCs.
+                is_likely_after_cproc = False
+                if self.output_lines:
+                    for i in range(len(self.output_lines) -1, -1, -1):
+                        prev_line = self.output_lines[i].strip()
+                        if prev_line and not prev_line.startswith("#"): # Find last non-comment line
+                            if prev_line.endswith("(CPROC)"):
+                                is_likely_after_cproc = True
+                            break
+                
+                if not is_likely_after_cproc:
+                    self._decrease_indent()
+            
+            self._add_line(f"# END (of {unit_name_ended})")
+            self.procedure_name = None    # Reset context
+            self.in_procedure = False     # Reset flag
+            return
+
+        # PROCEDURE definition: PROC name -> def name(): (SHELTRAN Specific)
         proc_match = re.match(r"PROC\s+([A-Za-z_][A-Za-z0-9_]*)", code_part, re.IGNORECASE)
         if proc_match:
             self.procedure_name = proc_match.group(1)
@@ -221,16 +305,15 @@ class SheltranToPythonConverter:
             self.in_procedure = True # Track that we are inside a PROC block
             return
 
-        # End of PROCEDURE: CPROC
+        # End of PROCEDURE: CPROC (SHELTRAN Specific)
         if re.match(r"CPROC", code_part, re.IGNORECASE):
             if self.in_procedure: 
                 self._decrease_indent()
                 proc_end_comment = f"# End of PROC {self.procedure_name if self.procedure_name else ''} (CPROC)"
                 self._add_line(proc_end_comment)
-                self.procedure_name = None
-                self.in_procedure = False
+                # self.procedure_name = None # Keep for context if END follows immediately
+                # self.in_procedure = False # Keep for context if END follows immediately
             else:
-                # CPROC found without a preceding PROC
                 self._add_line(f"# Stray CPROC found (no matching PROC): {code_part}")
             return
         
@@ -264,45 +347,67 @@ class SheltranToPythonConverter:
                 self._add_line(f"{name.upper()} = {python_value}") 
             return
 
-        # DATA statement: DATA var1, var2 /val1, val2/ -> var1 = val1; var2 = val2
-        # This is a highly simplified translation. Fortran DATA statements can be complex,
-        # involving arrays, implied DO loops, and repeat counts (e.g., 3*0.0).
-        # This version handles only simple lists of variables and corresponding literal values.
+        # --- Declaration Statements (INTEGER, REAL, DIMENSION, COMMON, etc.) ---
+        # These are translated into comments, as Python is dynamically typed and
+        # memory management (for COMMON/EQUIVALENCE) is different.
+
+        # Regex for standard Fortran type declarations (INTEGER, REAL, LOGICAL, CHARACTER[*N], DOUBLE PRECISION)
+        # Handles CHARACTER, CHARACTER*N, CHARACTER*(N), CHARACTER*(*), CHARACTER* (LEN=...), etc.
+        decl_match = re.match(r"(INTEGER|REAL|LOGICAL|CHARACTER(?:\s*\*[\s\d\(\*\)]+)?|DOUBLE\s+PRECISION)\s+(.+)", code_part, re.IGNORECASE)
+        if decl_match:
+            type_keyword = decl_match.group(1).upper() # e.g., "INTEGER", "CHARACTER*10"
+            variable_list_str = decl_match.group(2)    # The list of variables being declared
+            self._add_line(f"# DECLARATION: {type_keyword} {variable_list_str} (Fortran type declaration)")
+            return
+
+        # DIMENSION statement for array declarations
+        dim_match = re.match(r"DIMENSION\s+(.+)", code_part, re.IGNORECASE)
+        if dim_match:
+            declaration_list_str = dim_match.group(1) # e.g., "A(10), B(5,5)"
+            self._add_line(f"# DECLARATION: DIMENSION {declaration_list_str} (Fortran array dimensioning)")
+            return
+
+        # COMMON statement for shared memory blocks
+        # Regex captures optional block name: COMMON /BLOCK_NAME/ VAR1, VAR2 or COMMON VAR1, VAR2
+        common_match = re.match(r"COMMON(?:\s*/([A-Za-z_][A-Za-z0-9_]*)?/)?\s*(.+)", code_part, re.IGNORECASE)
+        if common_match:
+            block_name_match = common_match.group(1) # Optional block name
+            var_list_str = common_match.group(2)     # List of variables in the common block
+            block_name_comment = f"/ {block_name_match} / " if block_name_match else " (blank) "
+            self._add_line(f"# COMMON {block_name_comment}{var_list_str} # Fortran COMMON block. Requires manual review for Python global/shared state management.")
+            return
+
+        # EQUIVALENCE statement for memory aliasing
+        equiv_match = re.match(r"EQUIVALENCE\s*\((.+)\)", code_part, re.IGNORECASE)
+        if equiv_match:
+            equiv_list_str = equiv_match.group(1) # e.g., "(A, B), (C, D(1))"
+            self._add_line(f"# EQUIVALENCE ({equiv_list_str}) # Fortran EQUIVALENCE statement. Requires manual review due to Python's different memory model.")
+            return
+
+        # DATA statement for initialising variables.
+        # This translation is simplified and primarily handles basic cases.
+        # Complex DATA statements (e.g., with implied DOs, array sections, repeat counts for structured types)
+        # will likely require manual intervention.
         data_match = re.match(r"DATA\s+(.+?)\s*/(.*?)/", code_part, re.IGNORECASE)
         if data_match:
-            self._add_line(f"# SHELTRAN DATA Statement: {code_part} (manual review needed for arrays, complex types, or repeat counts)")
-            names_str = data_match.group(1).strip()
-            values_str = data_match.group(2).strip()
+            self._add_line(f"# Fortran DATA Statement: {code_part} (Simplified translation. Manual review needed for arrays, complex types, or repeat factors like N*value).")
+            names_str = data_match.group(1).strip()   # Variables list string
+            values_str = data_match.group(2).strip()  # Values list string
             
+            # Basic splitting by comma. This will not handle complex list structures perfectly.
             names = [name.strip() for name in names_str.split(',')]
-            # The value splitting is very basic and will fail if string literals contain commas
-            # or if there are repeat factors (e.g. N*value).
-            values = [val.strip() for val in values_str.split(',')] 
+            values = [val.strip() for val in values_str.split(',')]
 
             if len(names) == len(values):
                 for name, value in zip(names, values):
-                    self._add_line(f"{name} = {value}")
+                    # Attempt to translate the value part as an expression, in case it's a PARAMETER or simple const expression.
+                    translated_value = self._translate_expression(value)
+                    self._add_line(f"{name} = {translated_value} # From DATA statement")
             else:
-                # Add a comment indicating parsing difficulty.
-                self._add_line(f"# Could not fully parse DATA statement: {code_part} (name/value count mismatch or complex value structure)")
+                self._add_line(f"# Could not fully parse DATA statement: {code_part} (Name/value count mismatch or complex structure not supported by simple split).")
             return
-
-        # EQUIVALENCE statement - No direct Python equivalent. Comment out.
-        if re.match(r"EQUIVALENCE", code_part, re.IGNORECASE):
-            self._add_line(f"# {code_part} (SHELTRAN EQUIVALENCE statement - no direct Python equivalent, requires manual refactoring of memory layout)") 
-            return
-
-        # Variable Declarations (LOGICAL, INTEGER, CHARACTER, REAL, DOUBLE PRECISION)
-        # Python is dynamically typed, so declarations are not strictly needed. Comment them out for reference.
-        # CHARACTER*N length specifier is captured but not directly used in Python type system.
-        decl_match = re.match(r"(LOGICAL|INTEGER|CHARACTER(?:\s*\*?\s*\d+)?|REAL|DOUBLE\s+PRECISION)\s+(.+)", code_part, re.IGNORECASE)
-        if decl_match:
-            var_type = decl_match.group(1).upper() # e.g., "INTEGER"
-            var_names_list = decl_match.group(2)   # e.g., "A, B, C(10)"
-            self._add_line(f"# {var_type} {var_names_list} (SHELTRAN variable declaration - Python is dynamically typed; array dimensions/types need manual handling)") 
-            return
-
-        # --- Control Flow Structures ---
+            
+        # --- Control Flow Structures (SHELTRAN IF, SELECT, LOOPS, etc.) ---
 
         # IF THEN / ELSEIF THEN / ELSE / CIF (or ENDIF)
         # Regex for IF <condition> THEN, allowing optional parentheses around condition.
@@ -602,6 +707,7 @@ class SheltranToPythonConverter:
         # --- I/O Statements ---
         # These are often complex and GIPSY-specific. Basic translation for OPEN/CLOSE/REWIND.
         # READ/WRITE/FORMAT are commented out.
+        # Ensure these are checked before general assignment parsing.
 
         # OPEN(UNIT=u, FILE=f, STATUS=s, ERR=err_label, ...)
         open_match = re.match(r"OPEN\s*\((.+)\)", code_part, re.IGNORECASE)
@@ -743,86 +849,91 @@ class SheltranToPythonConverter:
              return
 
 
-        # Default catch-all: If no specific rule matched the `code_part` (content from col 7 onwards),
-        # comment out the original SHELTRAN line, prefixed with its line number for reference.
+        # --- Fortran Assignment Statement Translation (LHS = RHS) ---
+        # This is placed after specific keywords (SHELTRAN, CALL, I/O keywords) 
+        # but before the final "UNTRANSLATED" fallback.
         
-        # --- Assignment Statement Translation (LHS = RHS) ---
-        # This should be one of the last checks, as other keywords might contain '='.
-        # We need to robustly find the main '=' of the assignment.
-        # A simple regex like r"(.+?)\s*=\s*(.+)" can be too greedy or not greedy enough
-        # if the LHS or RHS contains function calls with named arguments (e.g. X = FUNC(ARG=Y)).
-        #
-        # Strategy: Find the first '=' that is not inside parentheses.
-        # This is a common way to distinguish the main assignment operator.
-        
+        # Strategy: Find the first '=' that is not inside parentheses to identify the main assignment operator.
         paren_level = 0
         split_index = -1
+        # Iterate over code_part to find the correct '=' for splitting LHS and RHS
         for i, char in enumerate(code_part):
             if char == '(':
                 paren_level += 1
             elif char == ')':
                 paren_level -= 1
-            elif char == '=' and paren_level == 0:
+            elif char == '=' and paren_level == 0: # Found the main assignment operator
                 split_index = i
                 break
         
-        if split_index != -1:
+        if split_index != -1: # If a valid assignment operator was found
             lhs_fortran = code_part[:split_index].strip()
             rhs_fortran = code_part[split_index+1:].strip()
 
-            if lhs_fortran and rhs_fortran: # Ensure both sides are non-empty
+            if lhs_fortran and rhs_fortran: # Ensure both LHS and RHS are non-empty
+                # Translate RHS using the comprehensive expression translator
                 translated_rhs = self._translate_expression(rhs_fortran)
-                translated_lhs = self._translate_expression(lhs_fortran) # Translate LHS for array/slice syntax
+                
+                # Translate LHS using the same comprehensive expression translator
+                # This handles array accesses A(I) -> A[I_py] and slices S(I:J) -> S[I_py:J_py] on the LHS
+                translated_lhs = self._translate_expression(lhs_fortran)
 
-                # Check if the translated LHS is a string slice assignment
-                # Regex to detect slice [start:end] or [index][start:end] etc.
-                # Looks for a colon within the last pair of square brackets.
+                # Check if the translated LHS represents an assignment to a string slice
+                # (e.g., my_string[0:5] = ..., which is illegal for Python strings).
                 is_lhs_string_slice = False
-                # Find all bracketed parts in translated_lhs
-                bracket_groups = re.findall(r"(\[[^\]]+\])", translated_lhs)
-                if bracket_groups:
-                    last_bracket_group = bracket_groups[-1]
-                    if ":" in last_bracket_group:
+                # Find all bracketed parts in the translated LHS (e.g., "[0]", "[0:5]", "[i][0:5]")
+                bracket_groups_in_lhs = re.findall(r"(\[[^\]]+\])", translated_lhs)
+                if bracket_groups_in_lhs:
+                    # Check if the last bracketed group contains a colon, indicating a slice.
+                    if ":" in bracket_groups_in_lhs[-1]:
                         is_lhs_string_slice = True
                 
-                # Also, if the original Fortran LHS was explicitly a character slice e.g. VAR(A:B)
-                # This is already handled by _translate_expression turning it into VAR[... : ...]
-                # The check above on translated_lhs should catch this.
-
                 if is_lhs_string_slice:
+                    # If LHS is a string slice, comment out the original line and add a note.
                     self._add_line(f"# ORIGINAL: {original_line_for_comment.strip()}")
                     self._add_line(f"# NOTE: Assignment to a string slice. Python strings are immutable.")
-                    self._add_line(f"# Manual refactoring needed (e.g., string concatenation or list of chars).")
+                    self._add_line(f"# Manual refactoring needed (e.g., use list of chars or string building).")
                 else:
-                    # Standard assignment (variable or array element)
+                    # Standard assignment (to a variable or an array element like my_array[i] = ...)
                     self._add_line(f"{translated_lhs} = {translated_rhs}")
-                return # Assignment handled (either translated or commented)
+                return # Assignment handled (either translated or commented out)
 
+        # --- Fallback for Unrecognized Lines ---
+        # If the line was not a comment, directive, SHELTRAN keyword, CALL, recognized I/O, or parseable assignment
         self._add_line(f"# UNTRANSLATED (L{line_number}): {original_line_for_comment.strip()}")
 
     def _translate_expression(self, expr_str):
-        # Placeholder for Fortran expression translation (intrinsics, slicing, array access)
+        # Translates a Fortran expression string into a Python equivalent.
+        # Handles:
+        # 1. Fortran-style array accesses (1-based to 0-based).
+        # 2. Fortran-style string slicing (1-based to 0-based).
+        # 3. Common Fortran intrinsic function calls.
+        # Applied iteratively to handle some level of nesting.
         
-        # Order of operations can be important here.
-        # 1. Array Access: MYARRAY(I, J) -> MYARRAY[i_py][j_py]
-        # 2. String Slicing: MYSTRING(I:J) -> MYSTRING[i_py:j_py]
-        # 3. Intrinsic Functions: FUNC(ARG) -> py_func(arg_py)
+        # Order of these transformations is crucial:
+        # 1. Array Access: `MYARRAY(I, J)` must become `MYARRAY[i_py][j_py]` before other steps
+        #    that might misinterpret `(I, J)` as function arguments or a slice.
+        # 2. String Slicing: `MYSTRING(I:J)` becomes `MYSTRING[i_py:j_py]`. Must be distinguished
+        #    from array access and function calls.
+        # 3. Intrinsic Functions: `FUNC(ARG)` becomes `py_func(arg_py)`. Arguments are recursively translated.
 
-        # --- 1. Fortran Array Access: ARRAY(idx1, idx2, ...) -> array[idx1_py][idx2_py]... ---
-        # Regex to find Fortran-style array access: IDENTIFIER(comma_separated_args_not_containing_colon)
-        # This negative lookahead for ':' helps distinguish array access from string slicing.
-        # The arguments themselves can be complex expressions.
+        # --- 1. Fortran Array Access: ARRAY(idx1, idx2, ...) -> array[python_idx1][python_idx2]... ---
+        # Regex: IDENTIFIER followed by `(` then a sequence of characters that are NOT `stuff_with_colon` then `)`.
+        # The `(?:(?!\s*:\s*)[^()])+` part is a non-capturing group that matches one or more characters
+        # that are not parentheses, as long as those characters do not form a `slice_content : slice_content` pattern.
+        # This helps distinguish `ARRAY(I, J)` from `STRING(I:J)`.
         array_access_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(((?:(?!\s*:\s*)[^()])+)\)")
 
         def replace_array_access(match_obj):
+            # Callback for re.sub to replace Fortran array access with Python 0-based equivalent.
             array_name = match_obj.group(1)
             indices_str = match_obj.group(2)
 
-            # Split indices by comma, but be careful with nested parentheses (e.g. A(I, FUNC(B,C)))
-            # This basic split is a simplification. A more robust approach would use a balanced parenthesis parser.
+            # Split indices by comma. Uses regex to avoid splitting commas inside parentheses
+            # (e.g., for an argument that is itself a function call like `A(I, FUNC(X,Y))`).
             fortran_indices = [idx.strip() for idx in re.split(r',(?![^()]*\))', indices_str)]
             
-            python_indices_parts = []
+            python_indices_parts = [] # Stores translated Python index expressions
             index_comments = []
 
             for fi in fortran_indices:
@@ -831,17 +942,18 @@ class SheltranToPythonConverter:
                     py_idx_val = int(fi) - 1
                     python_indices_parts.append(str(py_idx_val))
                 except ValueError:
-                    # If index is a variable or complex expression, translate it and then subtract 1
-                    # Recursively call _translate_expression for the index part
-                    translated_fi = self._translate_expression(fi)
-                    # Ensure parentheses if translated_fi itself is complex, e.g. (X+Y)-1
+                    # If index is a variable or complex expression, translate it recursively
+                    # and then append ` - 1` for 0-based indexing.
+                    translated_fi = self._translate_expression(fi) 
+                    # Add parentheses around the translated expression if it contains operators,
+                    # to ensure correct precedence before subtracting 1 (e.g., `(X+Y) - 1`).
                     if any(op in translated_fi for op in ['+', '-', '*', '/', '%']):
                         python_indices_parts.append(f"({translated_fi}) - 1")
                     else:
                         python_indices_parts.append(f"{translated_fi} - 1")
-                    index_comments.append(f"# REVIEW INDEX: Verify subtraction for 0-based: {python_indices_parts[-1]}")
+                    index_comments.append(f"# REVIEW INDEX: Verify 0-based subtraction for index '{fi}': {python_indices_parts[-1]}")
             
-            # Construct Python array access: array_name[idx1][idx2]...
+            # Reconstruct the Python array access string, e.g., array_name[idx1_py][idx2_py]...
             py_access_str = array_name
             for pi_part in python_indices_parts:
                 py_access_str += f"[{pi_part}]"
@@ -856,60 +968,53 @@ class SheltranToPythonConverter:
             prev_expr_str_arr = expr_str
             expr_str = array_access_pattern.sub(replace_array_access, expr_str)
 
-        # --- 2. Fortran String Slicing: VAR(start:end) -> VAR[start-1:end] ---
-        # Regex to find Fortran-style substring VAR(exp1:exp2).
-        # Important: This must be distinct enough not to clash with array access or function calls.
-        # The presence of a colon is key.
-        # It needs to be careful about function calls that look similar.
-        # This regex tries to match identifiers followed by (expr:expr).
-        # It's simplified and might need refinement for complex nested cases.
-        def replace_slice(match):
-            var_name = match.group(1)
-            start_expr = match.group(2)
-            end_expr = match.group(3)
+        # --- 2. Fortran String Slicing: VAR(start:end) -> VAR[python_start:python_end] ---
+        # Regex: IDENTIFIER `(` `optional_start_expr` `:` `optional_end_expr` `)`.
+        # The colon is the key distinguisher for slices.
+        # This pattern is applied *after* array access to avoid confusion if an array element
+        # is a string that is then sliced, e.g. `CHAR_ARRAY(I)(1:5)`.
+        # After array translation: `CHAR_ARRAY[i_py](1:5)`. The slice regex then acts on this.
+        slice_pattern = re.compile(
+            r"([A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])*)"  # Base variable, possibly already an array access like VAR[i]
+            r"\s*\(\s*([^:\)]*?)\s*:\s*([^:\)]*?)\s*\)"   # (start_expr : end_expr)
+        )
+
+        def replace_slice(match_obj):
+            # Callback for re.sub to replace Fortran string slices.
+            var_name_base = match_obj.group(1) # Variable name, potentially with Python array indices already
+            start_expr_f = match_obj.group(2).strip()
+            end_expr_f = match_obj.group(3).strip()
             
-            py_start = ""
-            py_end = end_expr if end_expr else ""
+            py_start_expr = ""
+            slice_comment = ""
 
-            comment = ""
-
-            if start_expr:
+            if start_expr_f: # If start_expr is present
                 try:
-                    # If start_expr is an integer literal, adjust it
-                    py_start = str(int(start_expr) - 1)
+                    py_start_expr = str(int(start_expr_f) - 1) # Adjust if integer literal
                 except ValueError:
-                    # If start_expr is a variable or complex expression
-                    py_start = start_expr
-                    comment = " # REVIEW SLICING: Fortran STR(A:B) to Python STR[A-1:B]. Verify start index."
+                    # If start_expr is a variable or complex expression, translate and comment for review
+                    py_start_expr = self._translate_expression(start_expr_f)
+                    slice_comment = " # REVIEW SLICE START: Fortran 1-based index; verify translation of start."
+            # If start_expr_f is empty, py_start_expr remains empty, meaning slice from beginning.
+
+            # end_expr_f is used directly in Python slice syntax if present.
+            # Fortran S(I:J) includes J, Python S[i:j] excludes j. So, Fortran S(I:J) is Python S[i-1:J].
+            # No adjustment needed for end_expr if it's a direct variable or number.
+            py_end_expr = self._translate_expression(end_expr_f) if end_expr_f else ""
             
-            # If end_expr is empty, Python slice [:end] or [start:] handles it.
-            # If start_expr is empty, Python slice [:end] handles it.
-            # If both are empty VAR(:) -> VAR[:], less common in Fortran for full string.
-
-            if not start_expr and not end_expr: # VAR(:) - unlikely in Fortran, but translates to full slice
-                 return f"{var_name}[:]{comment}"
-            if not start_expr: # VAR(:end)
-                return f"{var_name}[:{py_end}]{comment}"
-            if not end_expr: # VAR(start:)
-                 return f"{var_name}[{py_start}:]{comment}"
-
-            return f"{var_name}[{py_start}:{py_end}]{comment}"
-
-        # Regex: Identifier followed by (possibly_empty_expr : possibly_empty_expr)
-        # Ensure it doesn't capture function calls like MYFUNC(ARG) if ARG doesn't have ':'
-        # The negative lookahead for r"\s*\)" before the colon was problematic.
-        # Simpler: look for identifier then ( then stuff with a colon, then ).
-        slice_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^:\)]*?)\s*:\s*([^:\)]*?)\s*\)")
+            # Construct Python slice syntax
+            return f"{var_name_base}[{py_start_expr}:{py_end_expr}]{slice_comment}"
         
         prev_expr_str_slice = ""
-        while expr_str != prev_expr_str_slice: # Loop until no more changes are made
+        while expr_str != prev_expr_str_slice:
             prev_expr_str_slice = expr_str
             expr_str = slice_pattern.sub(replace_slice, expr_str)
 
 
-        # --- 3. Fortran Intrinsic Functions ---
-        # Using a more robust regex to match function calls: FUNC_NAME ( ARG1, ARG2, ... )
-        # This will also require careful argument parsing if we want to translate args themselves.
+        # --- 3. Fortran Intrinsic Functions & General Function Calls ---
+        # Regex to find function calls: FUNCTION_NAME `(` `arguments` `)`.
+        # Uses a negative lookbehind `(?<!\[)` to avoid re-matching parts of already translated
+        # Python array/slice syntax like `my_array[...]` during iterative processing.
         
         intrinsic_map = {
             # Name: (Python_equivalent, min_args, max_args, needs_math_module, comment)
@@ -1077,15 +1182,23 @@ if __name__ == "__main__":
     # --- Command-Line Argument Parsing ---
     # Allows the script to be run from the command line with input and optional output file paths.
     cli_parser = argparse.ArgumentParser(
-        description="Convert SHELTRAN (.shl) files to Python (.py).",
+        description="Convert SHELTRAN (.shl) and some Fortran 77 files to Python (.py).",
         epilog=(
-            "This script provides a best-effort translation and does not handle all SHELTRAN features perfectly.\n"
-            "Manual review and adjustment of the output Python code is essential, especially for:\n"
-            "- Array indexing (SHELTRAN is 1-based, Python is 0-based).\n"
-            "- GIPSY-specific library calls.\n"
-            "- FORMAT statements and complex I/O operations.\n"
-            "- DATA statements with repeat factors or complex initializations.\n"
-            "- COMMON blocks and memory layout dependencies."
+            "This script provides a best-effort syntactic translation. Manual review and "
+            "adjustment of the output Python code is ESSENTIAL.\n\n"
+            "Key areas requiring manual attention include:\n"
+            "  - Array Indexing: Fortran is 1-based, Python is 0-based. The script attempts\n"
+            "    to convert (e.g., A(I) -> A[I-1]), but complex indices need review.\n"
+            "    Look for '# REVIEW ARRAY ACCESS' and '# REVIEW INDEX' comments.\n"
+            "  - GIPSY-Specific Libraries: Calls to GIPSY routines (e.g., GDS routines, FIEINI)\n"
+            "    are translated syntactically but require a Python GIPSY environment or manual\n"
+            "    reimplementation.\n"
+            "  - I/O Operations: FORMAT statements and most READ/WRITE operations are commented out\n"
+            "    and require manual translation to Python's I/O and string formatting.\n"
+            "  - DATA Statements: Complex initializations (repeat factors, etc.) may not be fully translated.\n"
+            "  - COMMON/EQUIVALENCE: These are commented out; logic relying on them needs refactoring.\n"
+            "  - String Operations: Assignments to string slices are commented due to Python's string immutability.\n"
+            "  - Semantic Correctness: Verify numerical precision, logical flow, and overall behavior."
         ),
         formatter_class=argparse.RawTextHelpFormatter # To allow newlines in help messages
     )
